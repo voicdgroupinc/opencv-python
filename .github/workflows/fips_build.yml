@@ -5,19 +5,21 @@ name: FIPS Build
 # this:
 #   - targets only x86_64 / manylinux_2_28 / Python 3.12 (ModelAgent's actual runtime,
 #     not the full upstream compatibility matrix)
-#   - passes CMAKE_ARGS=-DWITH_FFMPEG=OFF to fully disable FFmpeg at the CMake
-#     level. OPENCV_FFMPEG_SKIP_DOWNLOAD=ON alone isn't enough: it only skips
-#     OpenCV's own prebuilt ffmpeg plugin download, but this build image has a
-#     system FFmpeg CMake finds and links against on its own -- and it's a newer
-#     version than OpenCV 4.12's videoio glue code (cap_ffmpeg_impl.hpp) expects,
-#     which fails to compile (avcodec_close / av_stream_get_side_data removed in
-#     newer FFmpeg). Vendored-plugin OR system FFmpeg both need to be off:
-#     the vendored one bundles OpenSSL 1.1.1k, whose FIPS self-test is what
-#     crashes ModelAgent on FIPS-enabled clusters (crypto/fips/fips.c:154: FATAL
-#     FIPS SELFTEST FAILURE). This means these wheels have no FFmpeg-backed
-#     cv2.VideoCapture() support at all -- known tradeoff, already handled on
-#     the ModelAgent side (FaceMetrixTool now reads video via a direct ffmpeg
-#     subprocess instead of cv2). See ModelAgent's
+#   - disables FFmpeg entirely (CMAKE_ARGS=-DWITH_FFMPEG=OFF, exported from
+#     travis_config.sh -- see that file for why it can't just live in this
+#     workflow's env: block). OPENCV_FFMPEG_SKIP_DOWNLOAD=ON alone isn't
+#     enough: it only skips OpenCV's own prebuilt ffmpeg plugin download, but
+#     this build image has a system FFmpeg CMake finds and links against on
+#     its own -- and it's a newer version than OpenCV 4.12's videoio glue code
+#     (cap_ffmpeg_impl.hpp) expects, which fails to compile (avcodec_close /
+#     av_stream_get_side_data removed in newer FFmpeg). Vendored-plugin OR
+#     system FFmpeg both need to be off: the vendored one bundles OpenSSL
+#     1.1.1k, whose FIPS self-test is what crashes ModelAgent on FIPS-enabled
+#     clusters (crypto/fips/fips.c:154: FATAL FIPS SELFTEST FAILURE). This
+#     means these wheels have no FFmpeg-backed cv2.VideoCapture() support at
+#     all -- known tradeoff, already handled on the ModelAgent side
+#     (FaceMetrixTool now reads video via a direct ffmpeg subprocess instead
+#     of cv2). See ModelAgent's
 #     documentation/notes_and_reference_info/FIPS_Issue_Investigations.md
 #   - publishes wheels as GitHub Release assets on this repo instead of to PyPI (no
 #     PyPI credentials for this fork, and these packages should never be published
@@ -70,12 +72,13 @@ jobs:
       SDIST: 0
       ENABLE_HEADLESS: ${{ matrix.without_gui }}
       ENABLE_CONTRIB: ${{ matrix.with_contrib }}
-      # See header comment: this is the actual FIPS fix. Consumed automatically by
-      # scikit-build (setup.py's build backend here), which appends the CMAKE_ARGS
-      # env var's contents to its own cmake invocation -- same mechanism already
-      # confirmed working in ModelAgent's own (reverted) in-place build attempt,
-      # where FFMPEG correctly came up disabled with no error from this flag.
-      CMAKE_ARGS: -DWITH_FFMPEG=OFF
+      # NOTE: CMAKE_ARGS is deliberately NOT set here. This env: block only
+      # reaches the host process that launches `docker run` for the actual
+      # build -- travis_linux_steps.sh doesn't forward CMAKE_ARGS into the
+      # container, so setting it here silently does nothing (confirmed: run
+      # 30460237712 still built FFMPEG: YES with it set at this level). The
+      # real fix lives in travis_config.sh, which IS sourced inside the
+      # container. See that file for the full explanation.
 
     steps:
     - name: Cleanup

@@ -36,6 +36,22 @@ else
   echo "    > Linux environment "
   export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/opt/Qt5.15.19/lib
   export MAKEFLAGS="-j$(grep -E '^processor[[:space:]]*:' /proc/cpuinfo | wc -l)"
+  # FIPS fix for ModelAgent (voicdgroupinc/ModelAgent): CMAKE_ARGS set in the
+  # GitHub Actions workflow's `env:` only affects the host process that runs
+  # `docker run` -- it is NOT one of the vars travis_linux_steps.sh forwards
+  # into the container (confirmed: FFMPEG still built as YES with it unset
+  # in-container). This file, unlike the workflow's env block, IS sourced
+  # inside the container (multibuild/docker_build_wrap.sh sources $CONFIG_PATH
+  # before bdist_wheel_cmd runs `setup.py bdist_wheel`), so exporting it here
+  # actually reaches the cmake invocation. Disables FFmpeg outright rather
+  # than -DOPENCV_FFMPEG_SKIP_DOWNLOAD=ON, which only skips OpenCV's own
+  # prebuilt ffmpeg plugin and still lets CMake link this image's system
+  # FFmpeg -- a version too new for OpenCV 4.12's videoio glue code
+  # (cap_ffmpeg_impl.hpp calls avcodec_close / av_stream_get_side_data,
+  # both removed upstream). No FFmpeg backend means no vendored OpenSSL
+  # 1.1.1k either, which is the actual FIPS fix -- see
+  # ModelAgent's documentation/notes_and_reference_info/FIPS_Issue_Investigations.md
+  export CMAKE_ARGS="-DWITH_FFMPEG=OFF"
   CURRENT_ARCH=$(uname -m)
   if [[ $CURRENT_ARCH == 'aarch64' ]]; then
     # To avoid network issues with pypi.org on OpenCV CN machines
