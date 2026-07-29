@@ -5,12 +5,20 @@ name: FIPS Build
 # this:
 #   - targets only x86_64 / manylinux_2_28 / Python 3.12 (ModelAgent's actual runtime,
 #     not the full upstream compatibility matrix)
-#   - passes CMAKE_ARGS=-DOPENCV_FFMPEG_SKIP_DOWNLOAD=ON so the build does not fetch
-#     OpenCV's prebuilt ffmpeg plugin, which bundles OpenSSL 1.1.1k -- the FIPS
-#     self-test in that vendored copy is what crashes ModelAgent on FIPS-enabled
-#     clusters (crypto/fips/fips.c:154: FATAL FIPS SELFTEST FAILURE). This also means
-#     these wheels have no FFmpeg-backed cv2.VideoCapture() support -- known tradeoff,
-#     see ModelAgent's documentation/notes_and_reference_info/FIPS_Issue_Investigations.md
+#   - passes CMAKE_ARGS=-DWITH_FFMPEG=OFF to fully disable FFmpeg at the CMake
+#     level. OPENCV_FFMPEG_SKIP_DOWNLOAD=ON alone isn't enough: it only skips
+#     OpenCV's own prebuilt ffmpeg plugin download, but this build image has a
+#     system FFmpeg CMake finds and links against on its own -- and it's a newer
+#     version than OpenCV 4.12's videoio glue code (cap_ffmpeg_impl.hpp) expects,
+#     which fails to compile (avcodec_close / av_stream_get_side_data removed in
+#     newer FFmpeg). Vendored-plugin OR system FFmpeg both need to be off:
+#     the vendored one bundles OpenSSL 1.1.1k, whose FIPS self-test is what
+#     crashes ModelAgent on FIPS-enabled clusters (crypto/fips/fips.c:154: FATAL
+#     FIPS SELFTEST FAILURE). This means these wheels have no FFmpeg-backed
+#     cv2.VideoCapture() support at all -- known tradeoff, already handled on
+#     the ModelAgent side (FaceMetrixTool now reads video via a direct ffmpeg
+#     subprocess instead of cv2). See ModelAgent's
+#     documentation/notes_and_reference_info/FIPS_Issue_Investigations.md
 #   - publishes wheels as GitHub Release assets on this repo instead of to PyPI (no
 #     PyPI credentials for this fork, and these packages should never be published
 #     to the real opencv-python/opencv-contrib-python/opencv-python-headless PyPI
@@ -67,7 +75,7 @@ jobs:
       # env var's contents to its own cmake invocation -- same mechanism already
       # confirmed working in ModelAgent's own (reverted) in-place build attempt,
       # where FFMPEG correctly came up disabled with no error from this flag.
-      CMAKE_ARGS: -DOPENCV_FFMPEG_SKIP_DOWNLOAD=ON
+      CMAKE_ARGS: -DWITH_FFMPEG=OFF
 
     steps:
     - name: Cleanup
@@ -186,7 +194,7 @@ jobs:
             FIPS-clean build for ModelAgent (voicdgroupinc/ModelAgent). OpenCV
             pinned to 4.12.0 (avoids the AVX512-VNNI DNN dispatch code introduced
             in 5.0.0, which fails to assemble on ModelAgent's build toolchain).
-            Built with CMAKE_ARGS=-DOPENCV_FFMPEG_SKIP_DOWNLOAD=ON: no FFmpeg
+            Built with CMAKE_ARGS=-DWITH_FFMPEG=OFF: no FFmpeg
             backend in cv2, so no vendored OpenSSL 1.1.1k either -- these wheels
             do not carry the FIPS self-test crash. cv2.VideoCapture() will not
             work with these builds; see FIPS_Issue_Investigations.md in
