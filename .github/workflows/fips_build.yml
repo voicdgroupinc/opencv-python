@@ -1,34 +1,23 @@
 name: FIPS Build
 
-# Builds a FIPS-clean opencv-python / opencv-python-headless / opencv-contrib-python
-# for ModelAgent (voicdgroupinc/ModelAgent). Unlike upstream's build_wheels_manylinux.yml,
-# this:
-#   - targets only x86_64 / manylinux_2_28 / Python 3.12 (ModelAgent's actual runtime,
-#     not the full upstream compatibility matrix)
-#   - disables FFmpeg entirely (CMAKE_ARGS=-DWITH_FFMPEG=OFF, exported from
-#     travis_config.sh -- see that file for why it can't just live in this
-#     workflow's env: block). OPENCV_FFMPEG_SKIP_DOWNLOAD=ON alone isn't
-#     enough: it only skips OpenCV's own prebuilt ffmpeg plugin download, but
-#     this build image has a system FFmpeg CMake finds and links against on
-#     its own -- and it's a newer version than OpenCV 4.12's videoio glue code
-#     (cap_ffmpeg_impl.hpp) expects, which fails to compile (avcodec_close /
-#     av_stream_get_side_data removed in newer FFmpeg). Vendored-plugin OR
-#     system FFmpeg both need to be off: the vendored one bundles OpenSSL
-#     1.1.1k, whose FIPS self-test is what crashes ModelAgent on FIPS-enabled
-#     clusters (crypto/fips/fips.c:154: FATAL FIPS SELFTEST FAILURE). This
-#     means these wheels have no FFmpeg-backed cv2.VideoCapture() support at
-#     all -- known tradeoff, already handled on the ModelAgent side
-#     (FaceMetrixTool now reads video via a direct ffmpeg subprocess instead
-#     of cv2). See ModelAgent's
-#     documentation/notes_and_reference_info/FIPS_Issue_Investigations.md
-#   - publishes wheels as GitHub Release assets on this repo instead of to PyPI (no
-#     PyPI credentials for this fork, and these packages should never be published
-#     to the real opencv-python/opencv-contrib-python/opencv-python-headless PyPI
-#     projects -- that would collide with upstream's own releases)
-#   - builds all three of opencv-python, opencv-python-headless and opencv-contrib-python
-#     from the same fixed config, so whichever one "wins" the site-packages install
-#     race (see FIPS_Issue_Investigations.md) no longer matters -- none of them carry
-#     a vendored OpenSSL
+# FIPS-clean opencv-python / opencv-python-headless / opencv-contrib-python for
+# ModelAgent (voicdgroupinc/ModelAgent), WITH FFmpeg video decoding.
+#
+# Since fips-v4.12.0-4 these are not source builds. fips/build_fips_wheels.sh takes
+# the upstream PyPI 4.12.0.88 wheels (sha256-pinned), rebuilds only their libavformat
+# from FFmpeg 5.1.6 without OpenSSL (inside quay.io/pypa/manylinux2014_x86_64, glibc
+# 2.17), swaps it in, deletes the bundled libssl/libcrypto 1.1.1 and relaxes the numpy
+# pin to numpy>=2 as the earlier fips releases did. Everything else (cv2, libavcodec,
+# libswscale, libavutil) stays the upstream binary, so frames decode exactly as with
+# the PyPI wheels; cv2.VideoCapture works on files again. Only https/tls/rtmps inputs
+# are gone, because they were what needed OpenSSL.
+#
+# Up to fips-v4.12.0-3 this workflow built OpenCV 4.12.0 from source with
+# -DWITH_FFMPEG=OFF (no vendored OpenSSL, but no cv2.VideoCapture either; see
+# ModelAgent's documentation/notes_and_reference_info/FIPS_Issue_Investigations.md).
+#
+# Wheels are published as GitHub Release assets on this repo, never to PyPI (they
+# would collide with upstream's own projects).
 
 on:
   workflow_dispatch:
@@ -39,140 +28,40 @@ on:
 jobs:
   Build:
     runs-on: ubuntu-22.04
-    defaults:
-      run:
-        shell: bash
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - with_contrib: 0
-            without_gui: 0
-            name: opencv-python
-          - with_contrib: 0
-            without_gui: 1
-            name: opencv-python-headless
-          - with_contrib: 1
-            without_gui: 0
-            name: opencv-contrib-python
-
-    env:
-      ACTIONS_ALLOW_UNSECURE_COMMANDS: true
-      REPO_DIR: .
-      PROJECT_SPEC: opencv-python
-      MB_PYTHON_VERSION: '3.12'
-      TRAVIS_PYTHON_VERSION: '3.12'
-      MB_ML_VER: 2_28
-      TRAVIS_BUILD_DIR: ${{ github.workspace }}
-      CONFIG_PATH: travis_config.sh
-      DOCKER_IMAGE: quay.io/opencv-ci/opencv-python-manylinux_2_28-x86-64:20260725
-      USE_CCACHE: 0
-      UNICODE_WIDTH: 32
-      PLAT: x86_64
-      SDIST: 0
-      ENABLE_HEADLESS: ${{ matrix.without_gui }}
-      ENABLE_CONTRIB: ${{ matrix.with_contrib }}
-      # NOTE: CMAKE_ARGS is deliberately NOT set here. This env: block only
-      # reaches the host process that launches `docker run` for the actual
-      # build -- travis_linux_steps.sh doesn't forward CMAKE_ARGS into the
-      # container, so setting it here silently does nothing (confirmed: run
-      # 30460237712 still built FFMPEG: YES with it set at this level). The
-      # real fix lives in travis_config.sh, which IS sourced inside the
-      # container. See that file for the full explanation.
-
     steps:
-    - name: Cleanup
-      run: find . -mindepth 1 -delete
-      working-directory: ${{ github.workspace }}
-
     - name: Checkout
       uses: actions/checkout@v7
-      with:
-        submodules: false
-        fetch-depth: 0
 
-    - name: Build a package
-      run: source scripts/build.sh
+    - name: Build the three wheels
+      run: bash fips/build_fips_wheels.sh wheelhouse
 
-    - name: Saving a wheel for ${{ matrix.name }}
+    - name: Save wheels
       uses: actions/upload-artifact@v7
       with:
-        name: wheel-${{ matrix.name }}
-        path: wheelhouse/opencv*.whl
+        name: fips-wheels
+        path: |
+          wheelhouse/opencv*.whl
+          wheelhouse/SHA256SUMS
+          wheelhouse/ffmpeg-*
 
   Test:
     needs: [Build]
     runs-on: ubuntu-22.04
-    defaults:
-      run:
-        shell: bash
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - with_contrib: 0
-            without_gui: 0
-            name: opencv-python
-          - with_contrib: 0
-            without_gui: 1
-            name: opencv-python-headless
-          - with_contrib: 1
-            without_gui: 0
-            name: opencv-contrib-python
-
-    env:
-      ACTIONS_ALLOW_UNSECURE_COMMANDS: true
-      MB_PYTHON_VERSION: '3.12'
-      NP_TEST_DEP: numpy==2.2.6
-      CONFIG_PATH: travis_config.sh
-      PLAT: x86_64
-      SDIST: 0
-      ENABLE_HEADLESS: ${{ matrix.without_gui }}
-      ENABLE_CONTRIB: ${{ matrix.with_contrib }}
-
     steps:
-    - name: Cleanup
-      run: find . -mindepth 1 -delete
-      working-directory: ${{ github.workspace }}
-
     - name: Checkout
       uses: actions/checkout@v7
-      with:
-        submodules: true
-        fetch-depth: 0
 
-    - name: Setup Environment variables
-      run: echo "TEST_DEPENDS=$(echo $NP_TEST_DEP)" >> $GITHUB_ENV
-
-    - name: Download wheel for ${{ matrix.name }}
+    - name: Download wheels
       uses: actions/download-artifact@v8
       with:
-        name: wheel-${{ matrix.name }}
+        name: fips-wheels
         path: wheelhouse/
 
-    - name: Package installation and run tests
-      run: source scripts/install.sh
-
-    # cv2 import must succeed with no FFmpeg backend, matching the FIPS build's
-    # intentional tradeoff -- but must NOT crash, and must NOT pull in a vendored
-    # OpenSSL. Fails loudly here instead of silently in ModelAgent's own build.
-    - name: Verify no vendored OpenSSL / FIPS crash string in the built wheel
-      run: |
-        set -e
-        WHL=$(ls wheelhouse/opencv*.whl | head -1)
-        mkdir -p /tmp/whl-check
-        cd /tmp/whl-check
-        unzip -q "$OLDPWD/$WHL"
-        if grep -rl "crypto/fips/fips.c\|FATAL FIPS SELFTEST FAILURE" . 2>/dev/null; then
-          echo "FAIL: built wheel still bundles the vendored OpenSSL that crashes under FIPS"
-          exit 1
-        fi
-        if find . -iname "libcrypto*" -o -iname "libssl*" | grep -q .; then
-          echo "FAIL: built wheel bundles a libssl/libcrypto of its own"
-          find . -iname "libcrypto*" -o -iname "libssl*"
-          exit 1
-        fi
-        echo "OK: no vendored OpenSSL/libcrypto in $WHL"
+    # In ModelAgent's base image, all three installed together with numpy 2.x:
+    # no libssl/libcrypto or OpenSSL 1.1.1 code anywhere in the wheels, import
+    # works, FFMPEG: YES, and VideoWriter/VideoCapture round trips read back.
+    - name: Check the wheels
+      run: bash fips/check_wheels.sh wheelhouse
 
   Release:
     if: startsWith(github.ref, 'refs/tags/fips-v')
@@ -180,25 +69,31 @@ jobs:
     runs-on: ubuntu-22.04
     permissions:
       contents: write
-    defaults:
-      run:
-        shell: bash
     steps:
       - uses: actions/download-artifact@v8
         with:
+          name: fips-wheels
           path: wheelhouse/
 
       - name: Publish wheels as GitHub Release assets
         uses: softprops/action-gh-release@v2
         with:
-          files: wheelhouse/wheel-*/opencv*.whl
-          generate_release_notes: true
+          files: |
+            wheelhouse/opencv*.whl
+            wheelhouse/SHA256SUMS
           body: |
-            FIPS-clean build for ModelAgent (voicdgroupinc/ModelAgent). OpenCV
-            pinned to 4.12.0 (avoids the AVX512-VNNI DNN dispatch code introduced
-            in 5.0.0, which fails to assemble on ModelAgent's build toolchain).
-            Built with CMAKE_ARGS=-DWITH_FFMPEG=OFF: no FFmpeg
-            backend in cv2, so no vendored OpenSSL 1.1.1k either -- these wheels
-            do not carry the FIPS self-test crash. cv2.VideoCapture() will not
-            work with these builds; see FIPS_Issue_Investigations.md in
-            ModelAgent for the known-affected call site and fallback plan.
+            FIPS-clean OpenCV 4.12 for ModelAgent (voicdgroupinc/ModelAgent), with
+            video decoding.
+
+            The upstream PyPI 4.12.0.88 wheels of opencv-python,
+            opencv-python-headless and opencv-contrib-python, with libavformat
+            rebuilt from FFmpeg 5.1.6 without OpenSSL and the bundled
+            libssl/libcrypto 1.1.1 removed (fips/build_fips_wheels.sh). No
+            library in these wheels links or carries OpenSSL.
+
+            - cv2.VideoCapture reads video files again (FFMPEG: YES); frames
+              decode identically to the PyPI wheels.
+            - https://, tls:// and rtmps:// inputs no longer open.
+            - Version 4.12.0.88+fips4; numpy>=2 (the PyPI pin numpy<2.3 is
+              relaxed, as in earlier fips releases).
+            - Install all three together, as ModelAgent does.
